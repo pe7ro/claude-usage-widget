@@ -41,7 +41,9 @@ ran, so a session whose status line re-runs without a new response can't roll th
 (The status line also re-runs when a prompt cache expires or a window resets.) Readings taken
 within 5 minutes of the newest are compared by value and the highest wins, because parallel
 sessions report in the order their responses end. Newest rather than highest matters after a
-usage reset: usage drops to 0 but `resets_at` stays the same. Claude Code drops a window from
+usage reset: usage drops to 0 but `resets_at` stays the same. So a newest reading 20 or more
+points below the highest counts as a reset and wins at once. A smaller drop shows up once the
+higher reading is 5 minutes old. Claude Code drops a window from
 its JSON once `resets_at` passes; the last reading is kept so the report can say "reset at
 12:00" rather than "no data".
 
@@ -145,14 +147,16 @@ The front matter at the top is for the memory form. It does no harm in the other
   then every Claude Code session from the last 24 hours: title, model, the share of its context
   in use (large, amber and red like the limits), what's free (`840k free of 1M`),
   API-equivalent cost, working directory, active / idle / ended. Drag the popup's edge to
-  resize it; Plasma remembers the size.
+  resize it; Plasma remembers the size, but never taller than what there is to show.
+
+![The popup: both plan limits, then four sessions with the share of their context in use](docs/popup.png)
 
 Needs KDE Plasma 6 and part 1.
 
 ```bash
 claude-usage/install.sh                # part 1, if not done yet
 plasmoid/install.sh                    # the widget; again = upgrade
-plasmawindowed io.github.claudeusage   # try it in a window
+plasmawindowed io.github.pe7ro.claudeusage   # try it in a window
 ```
 
 Then right-click the panel > *Add or Manage Widgets* > **Claude Usage**. After an upgrade, a
@@ -195,7 +199,8 @@ GNOME's Argos extension. Neither is built.
   app likely count against the same plan limit (not confirmed from the Claude Code docs). If so,
   the report only sees them at the next Claude Code response.
 - **A usage reset shows up with the next Claude Code response after it**, like any other change
-  to the limits.
+  to the limits. A drop of less than 20 points waits until the last higher reading is 5 minutes
+  old, as described above.
 - **A status line hides the footer's keyboard hints** (`esc to interrupt`, `? for shortcuts`).
   This happens even though this one prints nothing.
 - "Free context" is the whole window. Auto-compact starts before it reaches 0.
@@ -214,7 +219,7 @@ GNOME's Argos extension. Neither is built.
 
 ```bash
 python3 -m unittest discover -s tests   # the Python side, against temp dirs only
-plasmoid/install.sh && plasmawindowed io.github.claudeusage
+plasmoid/install.sh && plasmawindowed io.github.pe7ro.claudeusage
 journalctl --user -b | grep -i claudeusage   # QML errors when it runs in the panel
 pwsh -File windows/claude-usage-tray.ps1 -Print -Python python3 -Script claude-usage/claude_usage.py
 ```
@@ -231,11 +236,11 @@ plasmoid/package/contents/ui/FullView.qml     popup; LimitRow.qml / SessionRow.q
 plasmoid/package/contents/ui/format.js        every piece of display text
 windows/claude-usage-tray.ps1                 Windows tray icon; -Print for a text dump
 tests/                                        unittest + status line fixtures
+docs/                                         README images
 ```
 
-Before publishing: pick the real plugin Id (`io.github.claudeusage` is a placeholder and names
-the install folder; `io.github.pe7ro.claudeusage` would match the repo), screenshots, and a name
-that doesn't read as an official Anthropic product.
+Before publishing: a screenshot of the panel, and a name that doesn't read as an official
+Anthropic product. (`docs/popup.png` shows made-up sessions.)
 
 ## License
 

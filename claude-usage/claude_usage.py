@@ -25,6 +25,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import sys
@@ -47,6 +48,9 @@ SAME_WINDOW = 10 * 60
 # Readings of one window taken this close together are compared by value, not by time: parallel
 # sessions report in the order their responses end, which need not be the order of the numbers.
 CONCURRENT = 5 * 60
+# ...unless the newest of them is this many points below the highest: that is a usage reset, not a
+# late report. Readings that only arrive out of order differ by what was used in between.
+USAGE_RESET_DROP = 20
 
 LIMIT_WINDOWS = ("five_hour", "seven_day", "spend_limit")
 
@@ -259,7 +263,9 @@ def best_limit(name: str, records: dict[str, dict], now: float) -> dict | None:
     Every session sees the same account-wide limit, each as of its own last response. The newest
     window is the one with the latest resets_at. Within one window usage normally only goes up,
     but a usage reset brings it back down and keeps resets_at, so the newest reading wins; of
-    readings taken within CONCURRENT of it, the highest.
+    readings taken within CONCURRENT of it, the highest. Unless the newest is USAGE_RESET_DROP
+    below that highest: then it is a reset, and wins. (A smaller reset shows up once the higher
+    reading is CONCURRENT old; a late report that far below the rest would show until the next.)
     """
     readings = []
     for session_id, rec in records.items():
@@ -274,7 +280,10 @@ def best_limit(name: str, records: dict[str, dict], now: float) -> dict | None:
     same_window = [r for r in readings if (r[2] or 0.0) >= newest_reset - SAME_WINDOW]
     newest_seen = max(r[3] for r in same_window)
     recent = [r for r in same_window if r[3] >= newest_seen - CONCURRENT]
-    session_id, used, resets_at, seen_at = max(recent, key=lambda r: (r[1], r[3]))
+    highest = max(recent, key=lambda r: (r[1], r[3]))
+    newest = max(recent, key=lambda r: (r[3], r[1]))
+    pick = newest if newest[1] <= highest[1] - USAGE_RESET_DROP else highest
+    session_id, used, resets_at, seen_at = pick
     return {
         "used_percentage": used,
         "resets_at": resets_at,
@@ -465,12 +474,31 @@ def default_command() -> str:
         launcher = "py" if shutil.which("py") else "python"
         return f'{launcher} "{Path(__file__).resolve().as_posix()}"'
     installed = Path.home() / ".local" / "bin" / "claude-usage"
-    return str(installed) if installed.exists() else f"python3 {Path(__file__).resolve()}"
+    if installed.exists():
+        return shlex.quote(str(installed))  # a home folder may have a space in its name
+    return f"python3 {shlex.quote(str(Path(__file__).resolve()))}"
 
 
 def is_ours(command, subcommand: str) -> bool:
     return isinstance(command, str) and re.search(
         rf"claude[-_]usage(\.py)?['\"]?\s+{subcommand}\b", command) is not None
+
+
+def without_our_hook(groups: list) -> list:
+    """The SessionEnd groups with our hook taken out. Only a group left with no hooks goes: other
+    tools' hooks may share a group with ours."""
+    kept = []
+    for group in groups:
+        hooks = as_dict(group).get("hooks")
+        if not isinstance(hooks, list):
+            kept.append(group)
+            continue
+        others = [h for h in hooks if not is_ours(as_dict(h).get("command"), "session-end")]
+        if len(others) == len(hooks):
+            kept.append(group)
+        elif others:
+            kept.append({**group, "hooks": others})
+    return kept
 
 
 def _backup(path: Path) -> Path | None:
@@ -513,8 +541,7 @@ def configure(command: str | None = None) -> int:
 
     hooks = data.setdefault("hooks", {})
     groups = hooks.setdefault("SessionEnd", [])
-    groups[:] = [g for g in groups if not any(
-        is_ours(as_dict(h).get("command"), "session-end") for h in as_dict(g).get("hooks", []))]
+    groups[:] = without_our_hook(groups)
     groups.append({"matcher": "", "hooks": [{"type": "command", "command": f"{command} session-end"}]})
 
     if json.dumps(data, sort_keys=True) == before:
@@ -536,9 +563,8 @@ def unconfigure() -> int:
     hooks = as_dict(data.get("hooks"))
     groups = hooks.get("SessionEnd")
     if isinstance(groups, list):
-        kept = [g for g in groups if not any(
-            is_ours(as_dict(h).get("command"), "session-end") for h in as_dict(g).get("hooks", []))]
-        if len(kept) != len(groups):
+        kept = without_our_hook(groups)
+        if kept != groups:
             changed = True
             if kept:
                 hooks["SessionEnd"] = kept

@@ -25,6 +25,9 @@ ColumnLayout {
     Layout.preferredWidth: Kirigami.Units.gridUnit * 28
     Layout.minimumHeight: implicitHeight
     Layout.preferredHeight: implicitHeight
+    // No taller than its content: a size remembered from a day with more sessions would
+    // otherwise spread the rows apart. (The session list scrolls beyond its own cap anyway.)
+    Layout.maximumHeight: implicitHeight
     spacing: Kirigami.Units.smallSpacing
 
     SectionHeading {
@@ -107,6 +110,11 @@ ColumnLayout {
         text: "Error: " + full.error
         color: Kirigami.Theme.negativeTextColor
         wrapMode: Text.WordWrap
+    }
+
+    // Takes any height left over, should the popup still be taller, so the rows stay together.
+    Item {
+        Layout.fillHeight: true
     }
 
     PlasmaComponents.Label {

@@ -152,6 +152,16 @@ function Format-Limit([string]$Name, $Limit, [double]$Now) {
     return $parts -join $Dot
 }
 
+# For the tooltip: "5h 34% (2h 13m)", "7d reset", or '' without a reading. Either window can be
+# missing while the other is there.
+function Format-Short([string]$Name, $Limit, [double]$Now) {
+    if ($null -eq $Limit) { return '' }
+    if (Test-Reset $Limit $Now) { return "$Name reset" }
+    $text = "$Name $(Format-Percent $Limit.used_percentage)"
+    if ($null -ne $Limit.resets_at) { $text += " ($(Format-Duration ([double]$Limit.resets_at - $Now)))" }
+    return $text
+}
+
 function Format-Session($S, [double]$Now) {
     $ctx = $S.context
     $parts = @($S.title)
@@ -186,19 +196,19 @@ function Get-View($Report, [string]$ErrorText, [double]$Now) {
     $spend = $null
     if ($null -ne $limits) { $five = $limits.five_hour; $seven = $limits.seven_day; $spend = $limits.spend_limit }
 
+    # The icon shows the 5-hour limit, like the panel widget; the tooltip both.
     if ($ErrorText) {
-        $badge = '!'; $level = 'critical'; $tooltip = 'Claude usage: error, see the menu'
+        $badge = '!'; $level = 'critical'
     } elseif ($null -eq $five -or (Test-Reset $five $Now)) {
         $badge = $Dash; $level = 'none'
-        if ($null -eq $five) { $tooltip = 'Claude usage: no reading yet' }
-        else { $tooltip = "Claude 5h: reset at $(Format-When $five.resets_at $Now)" }
     } else {
         $badge = [string](Round-Half-Up $five.used_percentage)
         $level = Get-Level $five.used_percentage
-        $tooltip = "Claude 5h $(Format-Percent $five.used_percentage)"
-        if ($null -ne $five.resets_at) { $tooltip += " ($(Format-Duration ([double]$five.resets_at - $Now)))" }
-        if ($null -ne $seven -and -not (Test-Reset $seven $Now)) { $tooltip += "${Dot}7d $(Format-Percent $seven.used_percentage)" }
     }
+    $parts = @((Format-Short '5h' $five $Now), (Format-Short '7d' $seven $Now)) | Where-Object { $_ }
+    if ($ErrorText) { $tooltip = 'Claude usage: error, see the menu' }
+    elseif (@($parts).Count -eq 0) { $tooltip = 'Claude usage: no reading yet' }
+    else { $tooltip = 'Claude ' + (@($parts) -join $Dot) }
 
     $items = @()
     if ($ErrorText) { $items += @{ Text = "Error: $ErrorText"; Tip = '' }; $items += '-' }

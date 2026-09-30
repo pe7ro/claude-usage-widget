@@ -24,7 +24,7 @@ chmod 755 "$bin.tmp"
 mv -f "$bin.tmp" "$bin"
 echo "installed $bin"
 
-"$bin" configure --command "$bin"
+"$bin" configure   # the command it writes is $bin, shell-quoted
 
 echo
 case ":$PATH:" in

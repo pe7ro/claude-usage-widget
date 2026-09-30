@@ -10,12 +10,14 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 id="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["KPlugin"]["Id"])' \
       "$here/package/metadata.json")"
-pkg="${XDG_DATA_HOME:-$HOME/.local/share}/plasma/plasmoids/$id"
+plasmoids="${XDG_DATA_HOME:-$HOME/.local/share}/plasma/plasmoids"
+pkg="$plasmoids/$id"
 bin="$HOME/.local/bin/claude-usage"
 
-# Versions before the split linked the command into the widget package. Upgrading the package
-# would delete the link's target, and with it every Claude Code session's status line.
-if [ -L "$bin" ] && case "$(readlink "$bin")" in "$pkg"/*) true ;; *) false ;; esac; then
+# Versions before the split linked the command into their widget package (then under the Id
+# io.github.claudeusage). Removing that package would delete the link's target, and with it every
+# Claude Code session's status line.
+if [ -L "$bin" ] && case "$(readlink "$bin")" in "$plasmoids"/*) true ;; *) false ;; esac; then
     echo "$bin still points into the widget package. Run $(dirname "$here")/claude-usage/install.sh" >&2
     echo "first: it replaces the link with a copy of the command." >&2
     exit 1
@@ -40,5 +42,14 @@ if [ "$upgraded" = 1 ]; then
     echo "  systemctl --user restart plasma-plasmashell"
 else
     echo "Installed. Add it to a panel: right-click the panel > Add or Manage Widgets > \"Claude Usage\"."
+fi
+# The versions before the split used this Id. Plasma can't move a panel's widget to a new Id,
+# so the old package stays until its widgets are swapped for the new one.
+old_id=io.github.claudeusage
+if [ "$id" != "$old_id" ] && [ -d "$plasmoids/$old_id" ]; then
+    echo
+    echo "An older version is still installed as $old_id, and the panel keeps running it."
+    echo "Add the new \"Claude Usage\" to the panel, remove the old one (both have that name), then:"
+    echo "  kpackagetool6 -t Plasma/Applet -r $old_id"
 fi
 echo "Try it in a window first:  plasmawindowed $id"

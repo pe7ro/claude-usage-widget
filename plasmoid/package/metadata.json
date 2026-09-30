@@ -9,7 +9,7 @@
         "Category": "System Information",
         "Description": "Claude Code plan limits (5-hour, weekly) and the context left in each session",
         "Icon": "chronometer",
-        "Id": "io.github.claudeusage",
+        "Id": "io.github.pe7ro.claudeusage",
         "License": "MIT",
         "Name": "Claude Usage",
         "Version": "0.1.0",

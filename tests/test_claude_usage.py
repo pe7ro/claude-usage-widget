@@ -13,7 +13,9 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -205,6 +207,21 @@ class Reading(Base):
         self.assertEqual(seven["session_id"], "after")
         self.assertEqual(seven["as_of"], NOW)
 
+    def test_usage_reset_within_the_concurrent_window(self):
+        def reading(session_id, used, seen_at):  # a new response, so a new prompt_id
+            s = status(session_id=session_id, prompt_id=f"{session_id}-{seen_at}")
+            cu.record_status(with_limits(s, five=(used, FIVE_RESET)), seen_at)
+
+        reading("before", 95.0, NOW - 120)
+        reading("after", 4.0, NOW)  # two minutes later: far below, so a reset rather than a late report
+        self.assertEqual(cu.build_report(NOW)["limits"]["five_hour"]["used_percentage"], 4.0)
+
+        reading("before", 15.0, NOW - 120)
+        reading("after", 0.0, NOW)  # a small reset looks like a late report until 15 is CONCURRENT old
+        self.assertEqual(cu.build_report(NOW)["limits"]["five_hour"]["used_percentage"], 15.0)
+        reading("after", 0.0, NOW - 120 + cu.CONCURRENT + 1)
+        self.assertEqual(cu.build_report(NOW + cu.CONCURRENT)["limits"]["five_hour"]["used_percentage"], 0.0)
+
     def test_idle_and_ended(self):
         cu.record_status(FULL, NOW)
         cu.record_status(EARLY, NOW)
@@ -286,6 +303,38 @@ class Settings(Base):
         with redirect_stderr(io.StringIO()):
             self.assertEqual(cu.configure("/x/claude-usage"), 1)
         self.assertEqual(self.settings()["statusLine"]["command"], "~/.claude/statusline.sh")
+
+    def test_a_shared_session_end_group_keeps_the_other_hook(self):
+        shared = {"matcher": "", "hooks": [{"type": "command", "command": "other-tool end"},
+                                           {"type": "command", "command": "/x/claude-usage session-end"}]}
+        self.write_settings({"hooks": {"SessionEnd": [shared]}})
+        with redirect_stdout(io.StringIO()):
+            cu.configure("/x/claude-usage")
+        groups = self.settings()["hooks"]["SessionEnd"]
+        self.assertEqual([[h["command"] for h in g["hooks"]] for g in groups],
+                         [["other-tool end"], ["/x/claude-usage session-end"]])
+        self.write_settings({"hooks": {"SessionEnd": [shared]}})
+        with redirect_stdout(io.StringIO()):
+            cu.unconfigure()
+        self.assertEqual(self.settings(), {"hooks": {"SessionEnd": [
+            {"matcher": "", "hooks": [{"type": "command", "command": "other-tool end"}]}]}})
+
+    def test_commands_run_from_a_home_with_a_space(self):
+        home = Path(self.tmp.name) / "John Smith"
+        installed = home / ".local" / "bin" / "claude-usage"
+        installed.parent.mkdir(parents=True)
+        shutil.copy(SCRIPT, installed)
+        installed.chmod(0o755)
+        with mock.patch.dict(os.environ, {"HOME": str(home)}), redirect_stdout(io.StringIO()):
+            cu.configure()
+        data = self.settings()
+        for command, stdin in ((data["statusLine"]["command"], FULL),
+                               (data["hooks"]["SessionEnd"][0]["hooks"][0]["command"],
+                                {"session_id": FULL["session_id"], "reason": "clear"})):
+            run = subprocess.run(["sh", "-c", command], input=json.dumps(stdin), text=True,
+                                 capture_output=True)
+            self.assertEqual((run.returncode, run.stderr), (0, ""), command)
+        self.assertEqual(json.loads(cu.session_path(FULL["session_id"]).read_text())["end_reason"], "clear")
 
     def test_unconfigure_removes_only_ours(self):
         self.write_settings({"model": "opus[1m]"})
