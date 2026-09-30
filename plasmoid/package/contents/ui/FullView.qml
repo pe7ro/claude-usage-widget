@@ -15,9 +15,15 @@ ColumnLayout {
     property string error: ""
     property real warnAt: 70
     property real criticalAt: 90
+    property bool showActivity: true
+    property bool showClosed: true
 
     readonly property var limits: report && report.limits ? report.limits : ({})
-    readonly property var sessions: report && report.sessions ? report.sessions : []
+    readonly property var allSessions: report && report.sessions ? report.sessions : []
+    readonly property var sessions: showClosed ? allSessions : allSessions.filter(s => s.state !== "ended")
+    // Missing altogether from a claude-usage older than the session states: then nothing to say.
+    readonly property string liveError: showActivity && report && report.live && !report.live.available
+                                        ? (report.live.error || "unknown error") : ""
 
     // Plasma remembers a popup's size (popupWidth in the applet config) and only the minimum
     // overrides it, so the minimum is what makes an existing popup wider.
@@ -70,6 +76,15 @@ ColumnLayout {
         text: "Sessions"
     }
 
+    PlasmaComponents.Label {
+        Layout.fillWidth: true
+        visible: full.liveError !== ""
+        text: "Session states unavailable: " + full.liveError
+        font: Kirigami.Theme.smallFont
+        wrapMode: Text.WordWrap
+        opacity: 0.6
+    }
+
     PlasmaComponents.ScrollView {
         id: scroll
         Layout.fillWidth: true
@@ -92,6 +107,7 @@ ColumnLayout {
                 now: full.now
                 warnAt: full.warnAt
                 criticalAt: full.criticalAt
+                showActivity: full.showActivity
             }
         }
     }
@@ -99,7 +115,8 @@ ColumnLayout {
     PlasmaComponents.Label {
         Layout.fillWidth: true
         visible: full.sessions.length === 0
-        text: "No Claude Code session seen in the last 24 hours."
+        text: full.allSessions.length > 0 ? "No open Claude Code session. Closed ones are hidden in the settings."
+                                          : "No Claude Code session seen in the last 24 hours."
         wrapMode: Text.WordWrap
         opacity: 0.7
     }
@@ -120,7 +137,7 @@ ColumnLayout {
     PlasmaComponents.Label {
         Layout.fillWidth: true
         Layout.topMargin: Kirigami.Units.largeSpacing
-        text: "Updated whenever a Claude Code session gets a response. Plan limits need a claude.ai Pro or Max login."
+        text: "Limits and context update whenever a Claude Code session gets a response, session states every 30 s. Plan limits need a claude.ai Pro or Max login."
         font: Kirigami.Theme.smallFont
         wrapMode: Text.WordWrap
         opacity: 0.6

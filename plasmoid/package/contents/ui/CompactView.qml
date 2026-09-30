@@ -19,6 +19,8 @@ MouseArea {
     property bool failed: false
     property real warnAt: 70
     property real criticalAt: 90
+    property bool dotEnabled: false  // the setting: room for the dot is kept even while it's hidden
+    property int needsYou: 0  // sessions waiting for the user
     signal activated()
 
     readonly property bool vertical: Plasmoid.formFactor === PlasmaCore.Types.Vertical
@@ -28,12 +30,15 @@ MouseArea {
     // Font sizes follow the panel's thickness; in a vertical panel, its width.
     readonly property int topSize: Math.max(9, Math.round(vertical ? width / 3.2 : height * 0.5))
     readonly property int bottomSize: Math.max(8, Math.round(vertical ? width / 5 : height * 0.3))
+    readonly property int dotSize: Math.max(5, Math.round(bottomSize * 0.55))
+    // In a horizontal panel the dot gets a strip of its own, so it never covers "100%".
+    readonly property int dotRoom: dotEnabled && !vertical ? dotSize : 0
 
     // As wide as the widest text it will ever show, so the panel doesn't shift as digits change.
     readonly property real contentWidth: Math.ceil(Math.max(topWidest.width, bottomWidest.width,
                                                             top.implicitWidth, bottom.implicitWidth))
 
-    Layout.minimumWidth: vertical ? -1 : contentWidth + Kirigami.Units.smallSpacing * 2
+    Layout.minimumWidth: vertical ? -1 : contentWidth + Kirigami.Units.smallSpacing * 2 + dotRoom
     Layout.preferredWidth: Layout.minimumWidth
     Layout.maximumWidth: vertical ? -1 : Layout.minimumWidth
     Layout.minimumHeight: vertical ? column.implicitHeight + Kirigami.Units.smallSpacing * 2 : -1
@@ -45,9 +50,22 @@ MouseArea {
     TextMetrics { id: topWidest; font: top.font; text: "100%" }
     TextMetrics { id: bottomWidest; font: bottom.font; text: "4h 59m" }
 
+    // While a session needs you: a dot in the top-right corner.
+    Rectangle {
+        visible: compact.dotEnabled && compact.needsYou > 0
+        width: compact.dotSize
+        height: width
+        radius: width / 2
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.margins: Math.round(Kirigami.Units.smallSpacing / 2)
+        color: Kirigami.Theme.neutralTextColor
+    }
+
     ColumnLayout {
         id: column
         anchors.centerIn: parent
+        anchors.horizontalCenterOffset: -compact.dotRoom / 2
         spacing: 0
 
         PlasmaComponents.Label {

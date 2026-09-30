@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: 2026 pe7ro
+SPDX-License-Identifier: MIT
+The widget's settings (right-click > Configure Claude Usage).
+-->
+<kcfg xmlns="http://www.kde.org/standards/kcfg/1.0"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0 http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+  <kcfgfile name=""/>
+  <group name="General">
+    <entry name="showActivity" type="Bool">
+      <label>Show whether each session is working, needs you or is ready</label>
+      <default>true</default>
+    </entry>
+    <entry name="showClosed" type="Bool">
+      <label>List closed sessions</label>
+      <default>true</default>
+    </entry>
+    <entry name="panelIndicator" type="Bool">
+      <label>Show a dot in the panel while a session needs you</label>
+      <default>true</default>
+    </entry>
+  </group>
+</kcfg>

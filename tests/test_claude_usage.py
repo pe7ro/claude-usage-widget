@@ -5,7 +5,7 @@
     python3 -m unittest discover -s tests
 
 Every test runs against a temporary state dir and a temporary Claude config dir, so nothing
-here touches the real ~/.local/state or ~/.claude.
+here touches the real ~/.local/state or ~/.claude, and none runs the real `claude` command.
 """
 
 import copy
@@ -71,6 +71,7 @@ class Base(unittest.TestCase):
         self.env = mock.patch.dict(os.environ, {
             "CLAUDE_USAGE_STATE_DIR": str(root / "state"),
             "CLAUDE_CONFIG_DIR": str(root / "claude"),
+            "CLAUDE_USAGE_CLAUDE": str(root / "no-claude"),
         })
         self.env.start()
 
@@ -254,7 +255,141 @@ class Reading(Base):
         cu.record_status(FULL, cu.time.time())  # the CLI reports at the real clock
         code, out, _ = run_main(["report", "--json"], "")
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out)["sessions"][0]["model"], "Opus")
+        report = json.loads(out)
+        self.assertEqual(report["sessions"][0]["model"], "Opus")
+        self.assertFalse(report["live"]["available"])  # CLAUDE_USAGE_CLAUDE names no command
+        self.assertIn("can't run", report["live"]["error"])
+
+
+def agent(session_id, kind="interactive", **fields):
+    """One entry of `claude agents --json`."""
+    return {"sessionId": session_id, "kind": kind, "cwd": "/home/someone/work",
+            "startedAt": 1790000000000, **fields}
+
+
+class Live(Base):
+    @staticmethod
+    def listing(*entries):
+        return lambda: (list(entries), None)
+
+    def fake_claude(self, body):
+        path = Path(self.tmp.name) / "claude"
+        path.write_text(f"#!{sys.executable}\nimport sys\n{body}\n")
+        path.chmod(0o755)
+        os.environ["CLAUDE_USAGE_CLAUDE"] = str(path)  # setUp's patch.dict puts the old value back
+
+    def test_agent_view(self):
+        cases = [
+            (agent("a", pid=1, status="busy"), True, "working", None),
+            (agent("a", pid=1, status="waiting", waitingFor="permission prompt"),
+             True, "needs_input", "permission prompt"),
+            (agent("a", pid=1, status="idle"), True, "ready", None),
+            (agent("a"), False, None, None),  # an interactive session without a process
+            (agent("a", "background", state="working", pid=1, status="idle"), True, "working", None),
+            (agent("a", "background", state="failed", pid=1, status="idle"), True, "needs_input", "failed"),
+            (agent("a", "background", state="done", pid=1, status="idle"), True, "ready", None),
+            (agent("a", "background", state="blocked"), True, "needs_input", None),  # process gone
+            (agent("a", "background", state="stopped"), False, None, None),
+            (agent("a", "background", state="done", pid=1, status="waiting", waitingFor="dialog open"),
+             True, "needs_input", "dialog open"),
+        ]
+        for entry, live, activity, waiting_for in cases:
+            with self.subTest(entry=entry):
+                view = cu.agent_view(entry)
+                self.assertEqual((view["live"], view["activity"], view["waiting_for"]),
+                                 (live, activity, waiting_for))
+
+    def test_open_sessions_get_their_activity_and_needs_you_comes_first(self):
+        cu.record_status(FULL, NOW)
+        cu.record_status(EARLY, NOW - 600)  # older, so it would come second
+        report = cu.build_report(NOW + 120, self.listing(
+            agent(FULL["session_id"], pid=11, status="idle"),
+            agent(EARLY["session_id"], pid=12, status="waiting", waitingFor="permission prompt")))
+        self.assertEqual(report["live"], {"available": True, "error": None})
+        first, second = report["sessions"]
+        self.assertEqual((first["session_id"], first["activity"], first["waiting_for"]),
+                         (EARLY["session_id"], "needs_input", "permission prompt"))
+        self.assertEqual((second["activity"], second["live"], second["kind"]), ("ready", True, "interactive"))
+
+    def test_a_session_missing_from_the_list_was_closed(self):
+        cu.record_status(FULL, NOW)
+        empty = self.listing()
+        (s,) = cu.build_report(NOW + cu.LISTING_GRACE - 5, empty)["sessions"]
+        self.assertEqual((s["state"], s["live"]), ("active", None))  # it may have only just started
+        (s,) = cu.build_report(NOW + cu.LISTING_GRACE + 5, empty)["sessions"]
+        self.assertEqual((s["state"], s["live"], s["ended_at"], s["activity"]), ("ended", False, None, None))
+        self.assertEqual(cu.build_report(NOW + cu.LIST_ENDED_FOR + 60, empty)["sessions"], [])
+
+    def test_an_open_session_stays_listed(self):
+        cu.record_status(FULL, NOW)
+        later = NOW + cu.LIST_IDLE_FOR + 3600
+        (s,) = cu.build_report(later, self.listing(agent(FULL["session_id"], pid=11, status="idle")))["sessions"]
+        self.assertEqual((s["state"], s["activity"]), ("idle", "ready"))
+        self.assertEqual(cu.build_report(later)["sessions"], [])  # without the list, as before
+
+    def test_session_end_wins_over_the_list(self):
+        # After /clear the old id has ended, though the list may still name it for a moment.
+        cu.record_status(FULL, NOW)
+        cu.mark_ended({"session_id": FULL["session_id"], "reason": "clear"}, NOW + 10)
+        (s,) = cu.build_report(NOW + 20, self.listing(agent(FULL["session_id"], pid=11, status="busy")))["sessions"]
+        self.assertEqual((s["state"], s["live"], s["activity"]), ("ended", False, None))
+
+    def test_without_the_list_nothing_changes(self):
+        cu.record_status(FULL, NOW)
+        report = cu.build_report(NOW, lambda: (None, "the claude command was not found"))
+        self.assertEqual(report["live"], {"available": False, "error": "the claude command was not found"})
+        (s,) = report["sessions"]
+        self.assertEqual((s["state"], s["live"], s["activity"], s["waiting_for"]), ("active", None, None, None))
+        self.assertIn("session states unavailable: the claude command was not found", cu.report_text(report))
+
+    def test_text_report(self):
+        for session_id, at in (("w", NOW), ("n", NOW), ("r", NOW - 120), ("c", NOW - 600)):
+            cu.record_status(status(session_id=session_id, session_name=f"{session_id}-session"), at)
+        report = cu.build_report(NOW + 120, self.listing(
+            agent("w", pid=1, status="busy"),
+            agent("n", pid=2, status="waiting", waitingFor="input needed"),
+            agent("r", pid=3, status="idle")))
+        lines = {line.split()[0]: line for line in cu.report_text(report).splitlines() if "-session" in line}
+        self.assertIn(" working ", lines["w-session"])
+        self.assertIn(" needs you (input needed) ", lines["n-session"])
+        self.assertIn(" ready 4m ago ", lines["r-session"])
+        self.assertIn(" closed ", lines["c-session"])
+
+    def test_fetch_agents(self):
+        self.fake_claude("assert sys.argv[1:] == ['agents', '--json'], sys.argv\n"
+                         "print('[{\"sessionId\": \"a\", \"pid\": 1}, 3]')")
+        self.assertEqual(cu.fetch_agents(), ([{"sessionId": "a", "pid": 1}], None))
+
+        disabled = "'claude agents --json' is disabled by CLAUDE_CODE_DISABLE_AGENT_VIEW."
+        self.fake_claude(f"sys.stderr.write({disabled!r} + '\\n'); sys.exit(1)")
+        self.assertEqual(cu.fetch_agents(), (None, disabled))
+
+        self.fake_claude("print('Welcome to Claude Code')")
+        entries, error = cu.fetch_agents()
+        self.assertIsNone(entries)
+        self.assertIn("other than a list", error)
+
+        os.environ["CLAUDE_USAGE_CLAUDE"] = str(Path(self.tmp.name) / "missing")
+        entries, error = cu.fetch_agents()
+        self.assertIsNone(entries)
+        self.assertIn("can't run", error)
+
+    def test_fetch_agents_gives_up_on_a_hanging_command(self):
+        self.fake_claude("import time; time.sleep(30)")
+        with mock.patch.object(cu, "AGENTS_TIMEOUT", 0.5):
+            entries, error = cu.fetch_agents()
+        self.assertIsNone(entries)
+        self.assertIn("no answer", error)
+
+    def test_claude_command(self):
+        del os.environ["CLAUDE_USAGE_CLAUDE"]
+        home = Path(self.tmp.name) / "home"
+        with mock.patch.object(cu.shutil, "which", return_value=None), \
+                mock.patch.object(cu.Path, "home", return_value=home):
+            self.assertEqual(cu.fetch_agents(), (None, "the claude command was not found"))
+            (home / ".local" / "bin").mkdir(parents=True)
+            (home / ".local" / "bin" / "claude").touch()
+            self.assertEqual(cu.claude_command(), str(home / ".local" / "bin" / "claude"))
 
 
 class Settings(Base):

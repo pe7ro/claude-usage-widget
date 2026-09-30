@@ -36,11 +36,9 @@ ColumnLayout {
         }
     }
 
-    PlasmaComponents.ProgressBar {
+    Bar {
         Layout.fillWidth: true
-        from: 0
-        to: 100
-        value: row.limit && !row.reset ? Math.min(100, row.limit.used_percentage) : 0
+        value: row.limit && !row.reset ? row.limit.used_percentage : 0
     }
 
     PlasmaComponents.Label {

@@ -20,12 +20,17 @@ PlasmoidItem {
     readonly property int pollMs: 30 * 1000
     readonly property real warnAt: 70
     readonly property real criticalAt: 90
+    // The settings, ../config/main.xml
+    readonly property bool showActivity: Plasmoid.configuration.showActivity
+    readonly property bool showClosed: Plasmoid.configuration.showClosed
+    readonly property bool panelIndicator: Plasmoid.configuration.panelIndicator
 
     property var report: null
     property string error: ""
     property real now: Date.now() / 1000
 
     readonly property var fiveHour: report && report.limits ? report.limits.five_hour : null
+    readonly property int needsYou: showActivity ? Fmt.needsYouCount(report) : 0
     // The executable engine runs this through a shell. Plasma's own PATH may lack ~/.local/bin,
     // where claude-usage/install.sh puts the command.
     readonly property string command: 'PATH="$HOME/.local/bin:$PATH" claude-usage report --json'
@@ -79,7 +84,7 @@ PlasmoidItem {
     onExpandedChanged: if (expanded) refresh()
 
     toolTipMainText: "Claude plan usage"
-    toolTipSubText: Fmt.tooltip(report, now, error)
+    toolTipSubText: Fmt.tooltip(report, now, error, showActivity)
 
     compactRepresentation: CompactView {
         limit: root.fiveHour
@@ -87,6 +92,8 @@ PlasmoidItem {
         failed: root.error !== ""
         warnAt: root.warnAt
         criticalAt: root.criticalAt
+        dotEnabled: root.showActivity && root.panelIndicator
+        needsYou: root.needsYou
         onActivated: root.expanded = !root.expanded
     }
 
@@ -96,5 +103,7 @@ PlasmoidItem {
         error: root.error
         warnAt: root.warnAt
         criticalAt: root.criticalAt
+        showActivity: root.showActivity
+        showClosed: root.showClosed
     }
 }

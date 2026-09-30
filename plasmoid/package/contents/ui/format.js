@@ -105,13 +105,17 @@ function limitSummary(name, limit, now) {
     return text
 }
 
-function tooltip(report, now, error) {
+function tooltip(report, now, error, showActivity) {
     if (error)
         return "Error: " + error
     var limits = report && report.limits ? report.limits : {}
     var lines = [limitSummary("5-hour", limits.five_hour, now), limitSummary("7-day", limits.seven_day, now)]
     if (limits.five_hour && !isReset(limits.five_hour, now))
         lines.push("as of " + when(limits.five_hour.as_of, now))
+    if (showActivity)
+        needingYou(report).forEach(function (s) {
+            lines.push("Needs you: " + s.title + (s.waiting_for ? " (" + s.waiting_for + ")" : ""))
+        })
     return lines.join("\n")
 }
 
@@ -139,11 +143,64 @@ function contextLine(ctx) {
     return tokens(ctx.free_tokens) + " free of " + tokens(ctx.size)
 }
 
-function sessionState(session, now) {
+// "working" | "needs_input" | "ready" | "closed" | "none": what a session row's bar color says.
+// "none" when the states are turned off or unknown (claude-usage couldn't ask Claude Code).
+function activityLevel(session, showActivity) {
+    if (!showActivity || !session)
+        return "none"
     if (session.state === "ended")
-        return "ended " + ago(session.ended_at, now)
+        return "closed"
+    return session.activity || "none"
+}
+
+// Closed rows are dimmed. Without the states, so are rows with no response for 30 minutes.
+function dimmed(session, showActivity) {
+    if (!session || session.state === "ended")
+        return true
+    if (showActivity && session.live === true)
+        return false
+    return session.state !== "active"
+}
+
+function sessionState(session, now, showActivity) {
+    if (session.state === "ended")
+        return session.ended_at !== null && session.ended_at !== undefined
+               ? "closed " + ago(session.ended_at, now) : "closed"
     var age = ago(session.last_response_at, now)
+    var activity = showActivity ? session.activity : null
+    if (activity === "working")
+        return "working"
+    if (activity === "needs_input")
+        return "needs you"
+    if (activity === "ready")
+        return "ready · " + age
     return session.state === "idle" ? "idle · " + age : age
+}
+
+// Claude Code's `waitingFor` values, as the line under a session that needs you says them.
+var waitingForText = {
+    "permission prompt": "Waiting for your permission",
+    "input needed": "Waiting for your answer",
+    "sandbox request": "Waiting for a sandbox decision",
+    "worker request": "Waiting on a worker request",
+    "dialog open": "A dialog is open",
+    "failed": "The task failed"
+}
+
+function needsYouLine(session) {
+    var why = session.waiting_for
+    if (!why)
+        return "Waiting for you"
+    return waitingForText[why] || "Waiting for: " + why
+}
+
+function needingYou(report) {
+    var sessions = report && report.sessions ? report.sessions : []
+    return sessions.filter(function (s) { return s.state !== "ended" && s.activity === "needs_input" })
+}
+
+function needsYouCount(report) {
+    return needingYou(report).length
 }
 
 function sessionDetail(session) {

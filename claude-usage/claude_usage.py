@@ -8,7 +8,9 @@ window and, for claude.ai Pro/Max logins, the 5-hour and 7-day plan limits. It i
 documented place those limits appear, and it runs locally without spending tokens. This script
 is that status line command: it keeps the newest snapshot of every session on disk, and reports
 all of them at once: as text for a terminal or a Claude session, as JSON for a desktop widget
-(https://github.com/pe7ro/claude-usage-widget has one for KDE Plasma and one for Windows).
+(https://github.com/pe7ro/claude-usage-widget has one for KDE Plasma and one for Windows). The
+report also asks `claude agents --json` which sessions are still open and whether each one is
+working, waiting for the user, or ready for the next prompt.
 
   claude_usage.py statusline [--print]  status line command: stdin JSON -> session file
   claude_usage.py session-end           SessionEnd hook: mark the session ended
@@ -28,6 +30,7 @@ import re
 import shlex
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -51,6 +54,13 @@ CONCURRENT = 5 * 60
 # ...unless the newest of them is this many points below the highest: that is a usage reset, not a
 # late report. Readings that only arrive out of order differ by what was used in between.
 USAGE_RESET_DROP = 20
+
+# `claude agents --json` answers in a fraction of a second; a supervisor that doesn't respond
+# must not hold up the widget.
+AGENTS_TIMEOUT = 5
+# A session that wrote its file this recently may not be in that list yet (it has just started,
+# or just /clear'ed into a new id), so its absence doesn't yet mean it was closed.
+LISTING_GRACE = 60
 
 LIMIT_WINDOWS = ("five_hour", "seven_day", "spend_limit")
 
@@ -255,6 +265,103 @@ def mark_ended(hook: dict, now: float) -> Path | None:
     return path
 
 
+# --- open sessions -----------------------------------------------------------------------------
+
+def claude_command() -> str | None:
+    override = os.environ.get("CLAUDE_USAGE_CLAUDE")
+    if override:
+        return override
+    found = shutil.which("claude")
+    if found:
+        return found
+    # Where the native installer puts it: a widget's PATH may not include it.
+    installed = Path.home() / ".local" / "bin" / ("claude.exe" if ON_WINDOWS else "claude")
+    return str(installed) if installed.exists() else None
+
+
+def fetch_agents() -> tuple[list | None, str | None]:
+    """Claude Code's list of open sessions, or why there is none. Never raises: without the list
+    the report falls back to judging sessions by the time of their last response.
+
+    `claude agents --json` is documented as the supported way to read session state from outside
+    Claude Code. It lists every session whose process is alive, and background sessions that are
+    still working or blocked even when theirs has exited. (`--all` would add every finished
+    background session, however old: the supervisor stops their processes after about an hour
+    unattached, and from then on they count as closed here.)
+    """
+    command = claude_command()
+    if command is None:
+        return None, "the claude command was not found"
+    try:
+        done = subprocess.run([command, "agents", "--json"], stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=AGENTS_TIMEOUT,
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except subprocess.TimeoutExpired:
+        return None, f"claude agents --json gave no answer within {AGENTS_TIMEOUT} s"
+    except OSError as e:
+        return None, f"can't run {command}: {e.strerror or e}"
+    if done.returncode != 0:
+        # e.g. "'claude agents --json' is disabled by CLAUDE_CODE_DISABLE_AGENT_VIEW."
+        said = (done.stderr or done.stdout).decode("utf-8", "replace").strip().splitlines()
+        return None, (said[0][:200] if said else f"claude agents --json exited with {done.returncode}")
+    try:
+        entries = json.loads(done.stdout)
+    except ValueError:
+        entries = None
+    if not isinstance(entries, list):
+        return None, "claude agents --json printed something other than a list"
+    return [e for e in entries if isinstance(e, dict)], None
+
+
+NOT_LISTED = {"live": None, "activity": None, "waiting_for": None, "kind": None}
+
+
+def agent_view(entry: dict) -> dict:
+    """What one `claude agents --json` entry says about its session: whether it is still open,
+    and whether it is working, needs the user, or is ready for the next prompt."""
+    status = entry.get("status")  # busy | waiting | idle, while the process is alive
+    state = entry.get("state")    # working | blocked | done | failed | stopped, background only
+    kind = entry.get("kind")
+    waiting_for = entry.get("waitingFor") if isinstance(entry.get("waitingFor"), str) else None
+    if kind == "background" and state is not None:
+        live = state != "stopped"  # listed without a process only while working or blocked
+    else:
+        live = isinstance(entry.get("pid"), int)
+    activity = None
+    if live:
+        if status == "waiting" or state in ("blocked", "failed"):
+            activity = "needs_input"
+            if state == "failed" and waiting_for is None:
+                waiting_for = "failed"
+        elif status == "busy" or state == "working":
+            # A background session between steps it drives itself (a /loop, a wait on CI) is
+            # working too, though its process is idle meanwhile.
+            activity = "working"
+        elif status == "idle" or state == "done":
+            activity = "ready"
+    return {
+        "live": live,
+        "activity": activity,
+        "waiting_for": waiting_for if activity == "needs_input" else None,
+        "kind": kind if isinstance(kind, str) else None,
+    }
+
+
+def agents_by_session(entries: list) -> dict[str, dict]:
+    """agent_view per session id. Should an id be listed twice, the open entry wins, then the
+    one started last."""
+    best = {}
+    for entry in entries:
+        session_id = entry.get("sessionId")
+        if not isinstance(session_id, str):
+            continue
+        view = agent_view(entry)
+        rank = (view["live"], num(entry.get("startedAt")) or 0.0)
+        if session_id not in best or rank > best[session_id][0]:
+            best[session_id] = (rank, view)
+    return {session_id: view for session_id, (_, view) in best.items()}
+
+
 # --- reading -----------------------------------------------------------------------------------
 
 def best_limit(name: str, records: dict[str, dict], now: float) -> dict | None:
@@ -300,7 +407,9 @@ def display_path(path: str) -> str:
     return path
 
 
-def session_view(session_id: str, rec: dict, now: float) -> dict:
+def session_view(session_id: str, rec: dict, now: float, agents: dict[str, dict] | None = None) -> dict:
+    """One session for the report. `agents` is agents_by_session() of Claude Code's list of open
+    sessions, or None when there is no list: then only the time of the last response tells."""
     status = rec["status"]
     workspace = as_dict(status.get("workspace"))
     model = as_dict(status.get("model"))
@@ -308,7 +417,15 @@ def session_view(session_id: str, rec: dict, now: float) -> dict:
     cwd = workspace.get("current_dir") or status.get("cwd") or project_dir
     last = num(rec.get("response_at")) or num(rec.get("written_at")) or 0.0
     ended_at = num(rec.get("ended_at"))
+    agent = NOT_LISTED
     if ended_at is not None:
+        agent = dict(NOT_LISTED, live=False if agents is not None else None)
+    elif agents is not None:
+        agent = agents.get(session_id) or NOT_LISTED
+        written = num(rec.get("written_at")) or 0.0
+        if agent is NOT_LISTED and now - written > LISTING_GRACE:
+            agent = dict(NOT_LISTED, live=False)  # closed without a SessionEnd, e.g. its terminal
+    if ended_at is not None or agent["live"] is False:
         state = "ended"
     elif now - last > IDLE_AFTER:
         state = "idle"
@@ -328,6 +445,10 @@ def session_view(session_id: str, rec: dict, now: float) -> dict:
         "ended_at": ended_at,
         "end_reason": rec.get("end_reason"),
         "state": state,
+        "live": agent["live"],
+        "activity": agent["activity"],
+        "waiting_for": agent["waiting_for"],
+        "kind": agent["kind"],
         "claude_version": status.get("version"),
     }
 
@@ -343,27 +464,33 @@ def prune(records: dict[str, dict], now: float) -> None:
             del records[session_id]
 
 
-def build_report(now: float | None = None) -> dict:
+def build_report(now: float | None = None, listing=None) -> dict:
+    """`listing` returns Claude Code's list of open sessions like fetch_agents(). It is asked only
+    after the session files are read, so a session found in them is in the list if still open."""
     now = time.time() if now is None else now
     records = load_records()
     prune(records, now)
+    entries, live_error = listing() if listing is not None else (None, None)
+    agents = agents_by_session(entries) if entries is not None else None
 
     sessions = []
     for session_id, rec in records.items():
-        view = session_view(session_id, rec, now)
+        view = session_view(session_id, rec, now, agents)
         if view["state"] == "ended":
-            if now - view["ended_at"] > LIST_ENDED_FOR:
+            since = view["ended_at"] if view["ended_at"] is not None else view["last_response_at"]
+            if now - since > LIST_ENDED_FOR:
                 continue
-        elif now - view["last_response_at"] > LIST_IDLE_FOR:
-            continue
+        elif not view["live"] and now - view["last_response_at"] > LIST_IDLE_FOR:
+            continue  # an open session stays listed however long ago it last answered
         sessions.append(view)
     order = {"active": 0, "idle": 1, "ended": 2}
-    sessions.sort(key=lambda s: (order[s["state"]], -s["last_response_at"]))
+    sessions.sort(key=lambda s: (s["activity"] != "needs_input", order[s["state"]], -s["last_response_at"]))
 
     return {
         "version": RECORD_VERSION,
         "generated_at": now,
         "limits": {name: best_limit(name, records, now) for name in LIMIT_WINDOWS},
+        "live": {"available": entries is not None, "error": live_error},
         "sessions": sessions,
     }
 
@@ -414,6 +541,17 @@ def limit_text(limit: dict | None, now: float) -> str:
     return text + f"  as of {fmt_when(limit['as_of'], now)}"
 
 
+def session_state_text(s: dict, now: float) -> str:
+    if s["state"] == "ended":
+        return f"closed {fmt_duration(now - s['ended_at'])} ago" if s["ended_at"] is not None else "closed"
+    if s["activity"] == "working":
+        return "working"
+    if s["activity"] == "needs_input":
+        return f"needs you ({s['waiting_for']})" if s["waiting_for"] else "needs you"
+    word = "ready" if s["activity"] == "ready" else s["state"]
+    return f"{word} {fmt_duration(now - s['last_response_at'])} ago"
+
+
 def report_text(report: dict) -> str:
     now = report["generated_at"]
     limits = report["limits"]
@@ -431,10 +569,12 @@ def report_text(report: dict) -> str:
                        f" ({ctx['remaining_percentage']:.0f}%)")
         else:
             context = "context not measured yet"
-        when = s["ended_at"] if s["state"] == "ended" else s["last_response_at"]
         title = s["title"] if len(s["title"]) <= 28 else s["title"][:27] + "…"
         lines.append(f"{title:<28} {s['model_short'] or '?':<10} {context:<26}"
-                     f" {s['state']} {fmt_duration(now - when)} ago   {s['cwd_display']}")
+                     f" {session_state_text(s, now)}   {s['cwd_display']}")
+    live = report.get("live") or {}
+    if live.get("error"):
+        lines.append(f"session states unavailable: {live['error']}")
     return "\n".join(lines)
 
 
@@ -614,7 +754,7 @@ def cmd_session_end(args) -> int:
 
 
 def cmd_report(args) -> int:
-    report = build_report()
+    report = build_report(listing=fetch_agents)
     if args.json:
         json.dump(report, sys.stdout)  # ASCII: readable whatever encoding the reader assumes
         sys.stdout.write("\n")

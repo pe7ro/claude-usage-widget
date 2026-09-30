@@ -1,7 +1,7 @@
 # Claude Usage
 
-Your Claude Code plan limits (5-hour and weekly) and every session's free context, visible outside
-the session: in a terminal, to another Claude session that paces its work by them, in the KDE
+Your Claude Code plan limits (5-hour and weekly), every session's free context, and whether each
+session is working, needs you or is ready for your next prompt, visible outside the session: in a terminal, to another Claude session that paces its work by them, in the KDE
 Plasma panel, or in the Windows notification area.
 
 It comes in two parts:
@@ -30,6 +30,8 @@ Claude Code session ─┼─> claude-usage statusline ──> ~/.local/state/cl
 Claude Code session ─┘  SessionEnd hook ─> claude-usage session-end  (marks the file ended)
 
 terminal, Claude session, script ───────────> claude-usage report [--json]
+                                              ├─ reads the session files
+                                              └─ asks claude agents --json which sessions are open
 Plasma widget ── every 30 s ──> claude-usage report --json ──> panel text + popup
 Windows tray  ── every 30 s ──> claude_usage.py report --json ──> icon + menu
 ```
@@ -46,6 +48,16 @@ points below the highest counts as a reset and wins at once. A smaller drop show
 higher reading is 5 minutes old. Claude Code drops a window from
 its JSON once `resets_at` passes; the last reading is kept so the report can say "reset at
 12:00" rather than "no data".
+
+Which sessions are still open, and what each is doing, comes from `claude agents --json`. The
+[docs](https://code.claude.com/docs/en/agent-view) call it the supported way to read session
+state from outside Claude Code. It lists every session whose process is alive, interactive and
+background, with the same session id as the status line. Each one is *working*, *waiting* for
+you (a permission prompt, a question) or *idle*, ready for your next prompt. The report runs it
+each time, about 0.2 s, and it doesn't start Claude Code's background-session service. A
+session file whose session isn't listed is *closed*, even when no `SessionEnd` came, as when a
+terminal is closed. Background shells, monitors and subagents count as working: a session
+whose turn has ended reads *working* until they finish.
 
 ## Part 1: the `claude-usage` command
 
@@ -98,8 +110,13 @@ The Windows code paths are covered by the tests on Linux, but haven't run on Win
 5-hour   34%  resets 16:40 (in 2h 13m)  as of 14:27
 7-day    12%  resets Mon 09:00 (in 4d 3h)  as of 14:27
 
-example-app                  Opus       810k free of 1M (81%)      active 2m ago   ~/work/example-app
+example-app                  Opus       810k free of 1M (81%)      ready 2m ago   ~/work/example-app
+api-server                   Sonnet     640k free of 1M (64%)      needs you (permission prompt)   ~/work/api-server
 ```
+
+The state is `working`, `needs you (...)`, `ready 2m ago` or `closed 5m ago`. When `claude agents
+--json` can't be run, it is `active` or `idle` by the time of the last response, as before, and
+the report says why.
 
 The status line itself prints nothing into Claude Code. With `statusline --print` in the
 `statusLine.command`, Claude Code shows `ctx 812k free (81%) · 5h 34% → 16:40 · 7d 12%` there.
@@ -117,7 +134,12 @@ else may read it too:
 | &nbsp;&nbsp;`as_of` | when the response this reading came from ended |
 | &nbsp;&nbsp;`expired` | `resets_at` has passed: usage since then is unknown until the next response |
 | &nbsp;&nbsp;`session_id` | the session that reported it |
-| `sessions[]` | sessions with a response in the last 24 hours (ended ones for 6 hours after their end), active first: `session_id`, `title`, `model`, `model_short`, `project_dir`, `cwd`, `cwd_display`, `context` (`size`, `used_percentage`, `remaining_percentage`, `free_tokens`, each `null` until measured), `cost_usd` (API-equivalent), `state` (`active`, `idle` after 30 min without a response, `ended`), `last_response_at`, `ended_at`, `end_reason`, `claude_version` |
+| `live` | `available`: whether `claude agents --json` answered; `error`: why not, or `null` |
+| `sessions[]` | open sessions, sessions with a response in the last 24 hours, and ended ones for 6 hours after their end (or after their last response, when the end time is unknown). Those that need you come first, then active, idle, ended. Fields: `session_id`, `title`, `model`, `model_short`, `project_dir`, `cwd`, `cwd_display`, `context` (`size`, `used_percentage`, `remaining_percentage`, `free_tokens`, each `null` until measured), `cost_usd` (API-equivalent), `state` (`active`, `idle` after 30 min without a response, `ended`), `last_response_at`, `ended_at`, `end_reason`, `claude_version`, plus the fields below |
+| &nbsp;&nbsp;`live` | `true` while Claude Code lists the session as open, `false` once it doesn't (then `state` is `ended`, with `ended_at` `null` unless `SessionEnd` ran), `null` without the list |
+| &nbsp;&nbsp;`activity` | `working`, `needs_input` or `ready` while open, else `null` |
+| &nbsp;&nbsp;`waiting_for` | with `needs_input`: what it waits for, as Claude Code says it (`permission prompt`, `input needed`, `sandbox request`, `worker request`, `dialog open`), `failed` for a failed background task, else `null` |
+| &nbsp;&nbsp;`kind` | `interactive` or `background`, `null` when not listed |
 
 The JSON is ASCII: other characters come `\u`-escaped.
 
@@ -142,14 +164,24 @@ The front matter at the top is for the memory form. It does no harm in the other
 
 - **Panel**: the 5-hour limit, the percentage large over the time left until it resets
   (`34%` over `2h 13m`). Amber from 70 %, red from 90 %. `—` over `reset` once the window has
-  reset, `—` over `no data` before the first reading.
+  reset, `—` over `no data` before the first reading. An amber dot in the corner while a session
+  needs you. The tooltip names them.
 - **Popup**: the 5-hour and 7-day limits (and a spend limit, if you have one) with reset times,
-  then every Claude Code session from the last 24 hours: title, model, the share of its context
-  in use (large, amber and red like the limits), what's free (`840k free of 1M`),
-  API-equivalent cost, working directory, active / idle / ended. Drag the popup's edge to
-  resize it; Plasma remembers the size, but never taller than what there is to show.
+  then every open Claude Code session and every other one from the last 24 hours: title, model,
+  the share of its context in use (large, amber and red like the limits), what's free
+  (`840k free of 1M`), API-equivalent cost, working directory. Sessions that need you come
+  first. The color of a session's context bar says what it is doing:
+  - blue: working;
+  - amber: needs you, with the reason on a line of its own ("Waiting for your permission");
+  - green: ready for your next prompt;
+  - grey: closed.
 
-![The popup: both plan limits, then four sessions with the share of their context in use](docs/popup.png)
+  The row says the same in words. Drag the popup's edge to resize it; Plasma remembers the size,
+  but never taller than what there is to show.
+- **Settings** (right-click > *Configure Claude Usage*): show the session states or not, list
+  closed sessions or not, and the panel dot. All on by default.
+
+![The popup: both plan limits, then five sessions: one needs you, two are working, one is ready, one is closed](docs/popup.png)
 
 Needs KDE Plasma 6 and part 1.
 
@@ -186,7 +218,9 @@ Options: `-Script` (default `%LOCALAPPDATA%\claude-usage\claude_usage.py`), `-Py
 `py`, else `python`), `-PollSeconds` (30).
 
 It has only run on Linux, in PowerShell 7 with `-Print`. That checks the parsing, the error
-messages and every piece of text; the tray icon itself has not run on Windows yet.
+messages and every piece of text; the tray icon itself has not run on Windows yet. It doesn't
+show the session states (working, needs you, ready) yet. A session closed without `SessionEnd`
+shows as `ended`, without a time.
 
 The same report could drive a macOS menu bar item (SwiftBar and xbar show a script's output) or
 GNOME's Argos extension. Neither is built.
@@ -206,9 +240,18 @@ GNOME's Argos extension. Neither is built.
 - "Free context" is the whole window. Auto-compact starts before it reaches 0.
 - Observed on Claude Code 2.1.281, not documented: the status line also runs for background
   (daemon) sessions, and a changed `statusLine.command` makes every open session run it at once.
-  Undocumented: whether `SessionEnd` fires on Ctrl+C or when the terminal is closed. A session
-  that never reports its end turns *idle* after 30 min without a response and leaves the list
-  after 24 h.
+  Undocumented: whether `SessionEnd` fires on Ctrl+C or when the terminal is closed. It doesn't
+  matter while `claude agents --json` works, since a session missing from it counts as closed
+  (after a minute's grace: a new session may not be listed yet). Without it, a session that
+  never reports its end turns *idle* after 30 min without a response and leaves the list after
+  24 h.
+- **The session states need `claude agents --json`.** The report runs `claude` from the PATH,
+  or from `~/.local/bin`, where the native installer puts it. `CLAUDE_USAGE_CLAUDE` names
+  another command. With agent view turned off (`disableAgentView`,
+  `CLAUDE_CODE_DISABLE_AGENT_VIEW`), Claude Code refuses to list sessions. The widget then says
+  "Session states unavailable" and falls back to active / idle.
+- A finished background session reads *ready* until Claude Code's supervisor stops its process,
+  about an hour after it was last attached, and *closed* after that.
 - A session seen for the first time takes its last-activity time from the modification time of
   its transcript file (`transcript_path` in the status line JSON). Only the time is read, never
   the contents.
@@ -230,9 +273,12 @@ claude-usage/install.sh, uninstall.sh         part 1 on Linux and macOS
 claude-usage/memory-template.md               for Claude sessions: watch the limits
 plasmoid/install.sh, uninstall.sh             part 2
 plasmoid/package/metadata.json                KPackage metadata (Plasma/Applet)
+plasmoid/package/contents/config/             settings: main.xml (entries), config.qml (pages)
 plasmoid/package/contents/ui/main.qml         polling, tooltip, the two representations
-plasmoid/package/contents/ui/CompactView.qml  panel text
+plasmoid/package/contents/ui/CompactView.qml  panel text and dot
 plasmoid/package/contents/ui/FullView.qml     popup; LimitRow.qml / SessionRow.qml are its rows
+plasmoid/package/contents/ui/Bar.qml          the bars, drawn so their color can change
+plasmoid/package/contents/ui/configGeneral.qml  the settings page
 plasmoid/package/contents/ui/format.js        every piece of display text
 windows/claude-usage-tray.ps1                 Windows tray icon; -Print for a text dump
 tests/                                        unittest + status line fixtures
@@ -240,7 +286,8 @@ docs/                                         README images
 ```
 
 Before publishing: a screenshot of the panel, and a name that doesn't read as an official
-Anthropic product. (`docs/popup.png` shows made-up sessions.)
+Anthropic product. (`docs/popup.png` shows made-up sessions.) More in
+[`FUTURE_WORK.md`](FUTURE_WORK.md).
 
 ## License
 
