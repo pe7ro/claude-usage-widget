@@ -1,0 +1,19 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "pe7ro"
+            }
+        ],
+        "Category": "System Information",
+        "Description": "Claude Code plan limits (5-hour, weekly) and the context left in each session",
+        "Icon": "chronometer",
+        "Id": "io.github.claudeusage",
+        "License": "MIT",
+        "Name": "Claude Usage",
+        "Version": "0.1.0",
+        "Website": "https://github.com/pe7ro/claude-usage-widget"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0"
+}

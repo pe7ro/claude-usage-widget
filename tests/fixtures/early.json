@@ -1,0 +1,16 @@
+{
+  "cwd": "/home/someone/work/other",
+  "session_id": "5f1c2b3a-0000-4000-8000-00000000beef",
+  "model": {"id": "claude-sonnet-5", "display_name": "Sonnet"},
+  "workspace": {"current_dir": "/home/someone/work/other", "project_dir": "/home/someone/work/other"},
+  "version": "2.1.281",
+  "cost": {"total_cost_usd": 0, "total_duration_ms": 1200, "total_api_duration_ms": 0},
+  "context_window": {
+    "total_input_tokens": 0,
+    "total_output_tokens": 0,
+    "context_window_size": 200000,
+    "used_percentage": null,
+    "remaining_percentage": null,
+    "current_usage": null
+  }
+}
